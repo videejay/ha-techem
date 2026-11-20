@@ -61,7 +61,7 @@ class TechemConfigFlow(ConfigFlow, domain=DOMAIN):
 
     async def _login(self, username: str, password: str) -> dict[str, str]:
         """Log in with credentials; needs its own real cookie jar."""
-        session = async_create_clientsession(self.hass, cookie_jar=aiohttp.CookieJar())
+        session = async_create_clientsession(self.hass, cookie_jar=aiohttp.DummyCookieJar())
         return await login(session, username, password)
 
     async def _validate(self, cookies: dict[str, str]) -> tuple[str, dict[str, str]]:

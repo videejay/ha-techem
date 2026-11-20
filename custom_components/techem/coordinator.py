@@ -56,7 +56,7 @@ class TechemCoordinator(DataUpdateCoordinator[TechemData]):
         password = self.config_entry.data.get(CONF_PASSWORD)
         if not username or not password:
             return False
-        session = async_create_clientsession(self.hass, cookie_jar=aiohttp.CookieJar())
+        session = async_create_clientsession(self.hass, cookie_jar=aiohttp.DummyCookieJar())
         try:
             self.client.cookies = await login(session, username, password)
         except (TechemError, OSError, TimeoutError) as err:
