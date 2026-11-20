@@ -1,0 +1,60 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Techem Mieterportal",
+        "description": "Wie möchtest du dich mit mieter.techem.de verbinden?",
+        "menu_options": {
+          "credentials": "Mit E-Mail und Passwort anmelden",
+          "cookie": "Erweitert: Session-Cookie einfügen"
+        }
+      },
+      "credentials": {
+        "title": "Techem Mieterportal",
+        "description": "Gib deine Zugangsdaten für mieter.techem.de ein. Das Passwort wird nur verwendet, um die Sitzung automatisch zu holen und zu erneuern.",
+        "data": {
+          "username": "E-Mail",
+          "password": "Passwort"
+        }
+      },
+      "cookie": {
+        "title": "Techem Mieterportal",
+        "description": "Melde dich auf mieter.techem.de an, öffne die Entwicklertools des Browsers → Speicher/Anwendung → Cookies → mieter.techem.de und kopiere den Wert von `__Secure-next-auth.session-token` (oder füge den kompletten Cookie-Header ein).",
+        "data": {
+          "cookie": "Session-Cookie"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Techem-Sitzung abgelaufen",
+        "description": "Gib das Passwort für {email} erneut ein, um die Sitzung zu erneuern – oder füge einen frischen `__Secure-next-auth.session-token`-Cookie ein, falls du den Cookie-Weg nutzt.",
+        "data": {
+          "password": "Passwort",
+          "cookie": "Session-Cookie"
+        }
+      }
+    },
+    "error": {
+      "bad_cookie": "Im eingefügten Text wurde kein Session-Cookie gefunden.",
+      "invalid_auth": "Das Portal hat diese Zugangsdaten abgelehnt.",
+      "interaction_required": "Die Anmeldung erfordert einen Schritt im Browser (z. B. neue Nutzungsbedingungen bestätigen). Melde dich einmal auf mieter.techem.de an und versuche es erneut.",
+      "cannot_connect": "Das Techem-Portal konnte nicht erreicht oder gelesen werden."
+    },
+    "abort": {
+      "already_configured": "Dieses Techem-Konto ist bereits eingerichtet.",
+      "reauth_successful": "Sitzung erneuert.",
+      "unique_id_mismatch": "Diese Zugangsdaten gehören zu einem anderen Techem-Konto."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Heizungsmodell",
+        "description": "Das Modell verteilt jeden monatlichen Techem-Wert auf die Stunden des Monats und schätzt den laufenden Monat. Das Wetter (Außentemperatur und Solarstrahlung) kommt von Open-Meteo; es werden nur deine auf ~10 km gerundeten Standortkoordinaten gesendet. Heizkörperventil-Sensoren (Position in %) lassen die stündliche Verteilung dem tatsächlichen Öffnen der Heizkörper folgen; sie benötigen Langzeitstatistiken (state_class: measurement).",
+        "data": {
+          "weather": "Open-Meteo-Wetter verwenden (für Modell und Prognose nötig)",
+          "valves": "Heizkörperventil-Positionssensoren (optional)"
+        }
+      }
+    }
+  }
+}

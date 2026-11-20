@@ -5,17 +5,20 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 import logging
 
+import aiohttp
+
 from homeassistant.components.recorder.models import StatisticData, StatisticMeanType, StatisticMetaData
 from homeassistant.components.recorder.statistics import async_add_external_statistics
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import UnitOfEnergy, UnitOfVolume
+from homeassistant.const import CONF_PASSWORD, CONF_USERNAME, UnitOfEnergy, UnitOfVolume
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.helpers.aiohttp_client import async_create_clientsession
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 
 from .analysis import Analysis, analyse
-from .api import ServiceData, TechemAuthError, TechemClient, TechemError
+from .api import ServiceData, TechemAuthError, TechemClient, TechemError, login
 from .const import CONF_COOKIES, CONF_VALVES, CONF_WEATHER, DOMAIN
 from .weather import Weather
 
@@ -43,10 +46,34 @@ class TechemCoordinator(DataUpdateCoordinator[TechemData]):
         self.analyses: dict[str, Analysis] = {}
         self._imported: dict[str, dict[str, str]] = {}  # statistic id -> month -> signature
 
+    async def _fetch(self) -> TechemData:
+        await self.client.session_user()
+        return {unit: await self.client.consumption(unit) for unit in await self.client.units()}
+
+    async def _relogin(self) -> bool:
+        """Get a fresh session cookie from stored credentials. Returns success."""
+        username = self.config_entry.data.get(CONF_USERNAME)
+        password = self.config_entry.data.get(CONF_PASSWORD)
+        if not username or not password:
+            return False
+        session = async_create_clientsession(self.hass, cookie_jar=aiohttp.CookieJar())
+        try:
+            self.client.cookies = await login(session, username, password)
+        except (TechemError, OSError, TimeoutError) as err:
+            _LOGGER.debug("Techem automatic re-login failed: %s", err)
+            return False
+        _LOGGER.debug("Techem session renewed via stored credentials")
+        return True
+
     async def _async_update_data(self) -> TechemData:
         try:
-            await self.client.session_user()
-            data = {unit: await self.client.consumption(unit) for unit in await self.client.units()}
+            try:
+                data = await self._fetch()
+            except TechemAuthError:
+                # the session cookie expired: renew it from stored credentials
+                if not await self._relogin():
+                    raise
+                data = await self._fetch()
         except TechemAuthError as err:
             raise ConfigEntryAuthFailed(str(err)) from err
         except (TechemError, OSError, TimeoutError) as err:

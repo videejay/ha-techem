@@ -3,6 +3,22 @@
     "step": {
       "user": {
         "title": "Techem tenant portal",
+        "description": "How do you want to connect to mieter.techem.de?",
+        "menu_options": {
+          "credentials": "Log in with e-mail and password",
+          "cookie": "Advanced: paste a session cookie"
+        }
+      },
+      "credentials": {
+        "title": "Techem tenant portal",
+        "description": "Enter your mieter.techem.de login. The password is only used to obtain and renew the session automatically.",
+        "data": {
+          "username": "E-mail",
+          "password": "Password"
+        }
+      },
+      "cookie": {
+        "title": "Techem tenant portal",
         "description": "Log in at mieter.techem.de, open the browser's developer tools → Storage/Application → Cookies → mieter.techem.de and copy the value of `__Secure-next-auth.session-token` (or paste the whole Cookie header).",
         "data": {
           "cookie": "Session cookie"
@@ -10,21 +26,23 @@
       },
       "reauth_confirm": {
         "title": "Techem session expired",
-        "description": "Log in at mieter.techem.de again and paste a fresh `__Secure-next-auth.session-token` cookie.",
+        "description": "Re-enter the password for {email} to renew the session, or paste a fresh `__Secure-next-auth.session-token` cookie if you set this up with a cookie.",
         "data": {
+          "password": "Password",
           "cookie": "Session cookie"
         }
       }
     },
     "error": {
       "bad_cookie": "No session cookie found in the pasted text.",
-      "invalid_auth": "The portal rejected this cookie (expired or logged out).",
+      "invalid_auth": "The portal rejected these credentials.",
+      "interaction_required": "The login needs a step in the browser (e.g. accepting new terms). Log in once at mieter.techem.de, then try again.",
       "cannot_connect": "Could not reach or read the Techem portal."
     },
     "abort": {
       "already_configured": "This Techem account is already configured.",
       "reauth_successful": "Session renewed.",
-      "unique_id_mismatch": "This cookie belongs to a different Techem account."
+      "unique_id_mismatch": "These credentials belong to a different Techem account."
     }
   },
   "options": {

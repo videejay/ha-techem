@@ -82,8 +82,9 @@ Home Assistant:
   comparable households, and the kWh-per-unit factor.
 * **The full monthly history** (the portal keeps about three years) as long-term
   statistics, ready for a *Statistics graph* card or the **Energy dashboard**.
-* **No password stored.** You paste the portal's session cookie once; the integration
-  keeps it renewed by itself.
+* **Log in with e-mail and password**, right in Home Assistant — no need to dig a cookie
+  out of the browser. The integration gets the session itself and renews it automatically
+  when it expires. (Pasting a cookie is still available as an advanced option.)
 
 Data arrives monthly, a few days after the month ends. Use it for trends and
 year-on-year comparisons, not for real-time control.
@@ -121,8 +122,18 @@ Copy `custom_components/techem` into your `config/custom_components/` and restar
 
 ### Setup
 
-The portal logs in through Azure AD B2C on Techem's server and only hands the browser a
-session cookie, so that cookie is what the integration needs:
+*Settings → Devices & services → Add integration → Techem*, then choose **Log in with
+e-mail and password** and enter your `mieter.techem.de` login. That's it — the
+integration replays the portal's Azure AD B2C sign-in for you, obtains the session cookie
+and keeps it renewed.
+
+> [!NOTE]
+> The password is stored in the config entry (as Home Assistant does for any
+> cloud-polling integration) and used only to obtain and renew the session automatically.
+
+**Advanced: log in with a session cookie instead**
+
+If you'd rather not store the password, pick **Advanced: paste a session cookie**:
 
 1. Log in at [mieter.techem.de](https://mieter.techem.de).
 2. Open the developer tools:
@@ -131,7 +142,6 @@ session cookie, so that cookie is what the integration needs:
    * **Safari:** enable *Settings → Advanced → Show features for web developers*, then ⌥⌘I → *Storage* → *Cookies*
 3. Copy the value of `__Secure-next-auth.session-token`. If it is split into `.0` / `.1`
    parts, paste the whole `Cookie:` request header instead.
-4. *Settings → Devices & services → Add integration → Techem*, and paste it.
 
 > [!IMPORTANT]
 > Treat the cookie like a password: it gives read access to your portal account
@@ -183,7 +193,10 @@ and week views. Monthly totals are identical to Techem's.
 
 The portal issues a fresh cookie on every visit. The integration polls every 6 hours and
 saves the renewed cookie, so the session doesn't expire. If it ever does (for example
-after you log out everywhere), Home Assistant shows a re-authentication prompt: paste a
+after you log out everywhere), and you set the integration up with e-mail and password,
+it simply logs in again on the next poll — no action needed. If that fails (wrong
+password, or a pending step on the portal such as new terms to accept), Home Assistant
+shows a re-authentication prompt. Cookie-only setups always re-authenticate by pasting a
 fresh cookie.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>

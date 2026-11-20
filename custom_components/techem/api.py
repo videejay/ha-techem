@@ -12,7 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import json
 import re
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 import aiohttp
 
@@ -31,6 +31,14 @@ class TechemAuthError(Exception):
 
 class TechemError(Exception):
     """The portal answered with something we don't understand."""
+
+
+class TechemInteractionRequired(TechemError):
+    """Login needs a manual step in the browser (e.g. accepting new terms).
+
+    The credentials were accepted, but B2C showed another page instead of
+    redirecting back to the portal, so no session cookie was issued.
+    """
 
 
 @dataclass
@@ -116,3 +124,130 @@ class TechemClient:
             service = data.rows[0]["service"] if data.rows else slug.upper()
             result[service] = data
         return result
+
+
+# --- Interactive e-mail/password login (so no cookie has to be pasted) ---------
+#
+# The portal's login is NextAuth in front of an Azure AD B2C "CombinedSigninAndSignup"
+# self-asserted page. We replay the browser flow:
+#   1. get a NextAuth CSRF token and discover the OAuth provider id,
+#   2. start the sign-in so NextAuth hands back the B2C authorize URL (and keeps
+#      its PKCE/state in cookies),
+#   3. load the B2C login page and read its embedded transaction settings,
+#   4. POST the credentials to the B2C SelfAsserted endpoint,
+#   5. follow the "confirmed" redirect back through the NextAuth callback, which
+#      exchanges the code and sets `__Secure-next-auth.session-token`.
+# The session MUST carry a real cookie jar (not DummyCookieJar), because every
+# step above depends on cookies set by the previous one.
+
+_B2C_SETTINGS = re.compile(r"var SETTINGS = (\{.*?\});", re.DOTALL)
+_TIMEOUT = aiohttp.ClientTimeout(total=30)
+
+
+def _session_cookies(jar: aiohttp.abc.AbstractCookieJar) -> dict[str, str]:
+    """Pick the NextAuth session-token cookie(s) out of a cookie jar."""
+    return {c.key: c.value for c in jar if c.key.startswith(COOKIE_PREFIX) and c.value}
+
+
+async def login(session: aiohttp.ClientSession, username: str, password: str) -> dict[str, str]:
+    """Log in to mieter.techem.de with e-mail and password.
+
+    Returns the `__Secure-next-auth.session-token` cookie(s), ready to hand to
+    `TechemClient`. `session` must use a real cookie jar.
+    """
+    headers = {"User-Agent": USER_AGENT, "Accept-Language": "de"}
+    try:
+        # 1. CSRF token (sets the csrf cookie) + provider discovery
+        async with session.get(f"{BASE_URL}/api/auth/csrf", headers=headers, timeout=_TIMEOUT) as resp:
+            if resp.status != 200:
+                raise TechemError(f"csrf: HTTP {resp.status}")
+            csrf_token = (await resp.json(content_type=None)).get("csrfToken")
+        if not csrf_token:
+            raise TechemError("portal did not return a CSRF token")
+
+        async with session.get(f"{BASE_URL}/api/auth/providers", headers=headers, timeout=_TIMEOUT) as resp:
+            providers = await resp.json(content_type=None) if resp.status == 200 else {}
+        provider_id = next(
+            (p["id"] for p in (providers or {}).values() if p.get("type") in ("oauth", "oidc") and p.get("id")),
+            "azure-ad-b2c",
+        )
+
+        # 2. Begin sign-in -> NextAuth returns the B2C authorize URL
+        async with session.post(
+            f"{BASE_URL}/api/auth/signin/{provider_id}",
+            data={"csrfToken": csrf_token, "callbackUrl": f"{BASE_URL}/de", "json": "true"},
+            headers={**headers, "Content-Type": "application/x-www-form-urlencoded"},
+            allow_redirects=False,
+            timeout=_TIMEOUT,
+        ) as resp:
+            authorize_url = resp.headers.get("Location", "")
+            if not authorize_url and resp.status == 200:
+                try:
+                    authorize_url = (await resp.json(content_type=None)).get("url", "")
+                except (ValueError, aiohttp.ClientError):
+                    authorize_url = ""
+        if "authorize" not in authorize_url and "b2clogin" not in authorize_url:
+            raise TechemError("could not start the portal login")
+
+        # 3. Load the B2C login page and read its transaction settings
+        async with session.get(authorize_url, headers=headers, timeout=_TIMEOUT) as resp:
+            if resp.status != 200:
+                raise TechemError(f"login page: HTTP {resp.status}")
+            login_page_url = str(resp.url)
+            match = _B2C_SETTINGS.search(await resp.text())
+        if not match:
+            raise TechemError("unexpected login page")
+        try:
+            settings = json.loads(match.group(1))
+            b2c_csrf = settings["csrf"]
+            tx = settings["transId"]
+            tenant = settings["hosts"]["tenant"]
+            policy = settings["hosts"]["policy"]
+            api = settings.get("api", "CombinedSigninAndSignup")
+        except (KeyError, TypeError, ValueError) as err:
+            raise TechemError("unexpected login page settings") from err
+
+        parts = urlsplit(login_page_url)
+        origin = f"{parts.scheme}://{parts.netloc}"
+        base = f"{origin}{tenant}"
+        query = {"tx": tx, "p": policy}
+
+        # 4. Submit the credentials
+        async with session.post(
+            f"{base}/SelfAsserted",
+            params=query,
+            data={"request_type": "RESPONSE", "signInName": username, "password": password},
+            headers={
+                **headers,
+                "X-CSRF-TOKEN": b2c_csrf,
+                "X-Requested-With": "XMLHttpRequest",
+                "Origin": origin,
+                "Referer": login_page_url,
+            },
+            timeout=_TIMEOUT,
+        ) as resp:
+            result = await resp.json(content_type=None)
+        if str(result.get("status")) != "200":
+            raise TechemAuthError(result.get("message") or result.get("errorCode") or "login rejected")
+
+        # 5. Follow the "confirmed" redirect chain; the NextAuth callback in it
+        #    sets the session cookie in our jar.
+        async with session.get(
+            f"{base}/api/{api}/confirmed",
+            params={"rememberMe": "false", "csrf_token": b2c_csrf, **query},
+            headers={**headers, "Referer": login_page_url},
+            allow_redirects=True,
+            timeout=_TIMEOUT,
+        ) as resp:
+            await resp.read()
+    except (aiohttp.ClientError, TimeoutError) as err:
+        raise TechemError(f"login failed: {err}") from err
+
+    cookies = _session_cookies(session.cookie_jar)
+    if not cookies:
+        raise TechemInteractionRequired(
+            "the credentials were accepted but no session was issued; open "
+            "mieter.techem.de once in a browser to clear any pending step "
+            "(e.g. new terms to accept), then try again"
+        )
+    return cookies
