@@ -22,10 +22,9 @@ from .const import BASE_URL, COOKIE_PREFIX, USER_AGENT
 _LOGGER = logging.getLogger(__name__)
 
 _FLIGHT = re.compile(r'self\.__next_f\.push\(\[1,("(?:[^"\\]|\\.)*")\]\)')
-_ROW = re.compile(r'\{"period":"\d{4}-\d{2}","service":"[^{}]*\}')
-_AVERAGE = re.compile(r'"averageConsumption":(\{[^{}]*\})')
-_AGREEMENTS = re.compile(r'"rentalAgreements":(\[[^\]]*\])')
-_DETAIL = re.compile(r'/consumptions/([a-z_-]+)/(\d{4}-\d{2})"')
+# Detail links look like /consumptions/<slug>/<YYYY-MM>; the slug can be any
+# token the portal chooses (letters, digits, dashes, ...), so match greedily.
+_DETAIL = re.compile(r'/consumptions/([^/"]+)/(\d{4}-\d{2})"')
 
 
 class TechemAuthError(Exception):
@@ -63,6 +62,62 @@ def parse_cookies(text: str) -> dict[str, str]:
 
 def flight(html: str) -> str:
     return "".join(json.loads(m) for m in _FLIGHT.findall(html))
+
+
+def _walk_dicts(obj: object):
+    """Yield every dict nested anywhere inside obj (including obj itself)."""
+    if isinstance(obj, dict):
+        yield obj
+        for value in obj.values():
+            yield from _walk_dicts(value)
+    elif isinstance(obj, list):
+        for value in obj:
+            yield from _walk_dicts(value)
+
+
+def _find_objects(text: str, *keys: str):
+    """Yield every JSON object embedded in `text` that has all of `keys`.
+
+    The portal's flight payload is a stream of JSON fragments, not one valid
+    document, and the objects we want can sit anywhere (standalone or nested in
+    a parent). So we scan for each `{`, let the JSON decoder consume the whole
+    object there, then walk it for matching sub-objects. This is independent of
+    key order and survives nested braces, unlike a flat regex.
+    """
+    decoder = json.JSONDecoder()
+    index = 0
+    length = len(text)
+    while index < length:
+        start = text.find("{", index)
+        if start < 0:
+            return
+        try:
+            obj, end = decoder.raw_decode(text, start)
+        except ValueError:
+            index = start + 1
+            continue
+        for candidate in _walk_dicts(obj):
+            if all(key in candidate for key in keys):
+                yield candidate
+        index = max(end, start + 1)
+
+
+def _collect_rows(page: str) -> list[dict]:
+    """Every consumption row on a page, whatever the service or key order."""
+    return [
+        row
+        for row in _find_objects(page, "period", "unitOfMeasure", "amount")
+        if row.get("amount") is not None
+    ]
+
+
+def _collect_average(page: str) -> dict | None:
+    """The 'comparable households' average, if the page carries one."""
+    for obj in _find_objects(page, "averageConsumption"):
+        avg = obj["averageConsumption"]
+        if isinstance(avg, dict) and avg.get("amount") is not None:
+            return avg
+    return None
 
 
 class TechemClient:
@@ -104,28 +159,62 @@ class TechemClient:
         return data.get("sub") or data["user"].get("email", "techem")
 
     async def units(self) -> list[str]:
-        agreements = _AGREEMENTS.search(await self._page("/de"))
-        if not agreements:
+        page = await self._page("/de")
+        units: list[str] = []
+        for agreement in _find_objects(page, "residentialUnitId"):
+            uid = agreement.get("residentialUnitId")
+            if uid and uid not in units:
+                units.append(uid)
+        if not units:
             raise TechemError("no rental agreements found")
-        return [a["residentialUnitId"] for a in json.loads(agreements.group(1)) if a.get("residentialUnitId")]
+        return units
 
     async def consumption(self, unit: str) -> dict[str, ServiceData]:
+        """Every service, every month, every field the portal exposes for a unit.
+
+        We read the consumptions index (which already carries rows) and, for
+        each service it links to, the detail page with that service's full
+        history and household average, then merge everything by service name.
+        """
         base = f"/de/{quote(unit, safe=':')}/consumptions"
-        services = dict(_DETAIL.findall(await self._page(base)))  # slug -> latest period
+        index = await self._page(base)
+
+        # slug -> newest linked period (the detail page of the newest period
+        # carries the whole history, so one fetch per service is enough)
+        latest: dict[str, str] = {}
+        for slug, period in _DETAIL.findall(index):
+            if period > latest.get(slug, ""):
+                latest[slug] = period
+
+        pages = [index]
+        for slug, period in latest.items():
+            try:
+                pages.append(await self._page(f"{base}/{slug}/{period}"))
+            except TechemError as err:
+                _LOGGER.debug("Techem detail page %s/%s failed: %s", slug, period, err)
+
         result: dict[str, ServiceData] = {}
-        for slug, period in services.items():
-            page = await self._page(f"{base}/{slug}/{period}")
-            data = ServiceData()
-            for raw in _ROW.findall(page):
-                row = json.loads(raw)
-                if row.get("amount") is not None:
-                    data.rows.append(row)
-            if avg := _AVERAGE.search(page):
-                data.average = json.loads(avg.group(1))
-            # rows repeat across chart blocks: keep one per (period, unit)
-            data.rows = sorted({(r["period"], r["unitOfMeasure"]): r for r in data.rows}.values(), key=lambda r: r["period"])
-            service = data.rows[0]["service"] if data.rows else slug.upper()
-            result[service] = data
+        for page in pages:
+            rows_by_service: dict[str, list[dict]] = {}
+            for row in _collect_rows(page):
+                rows_by_service.setdefault(row.get("service") or "UNKNOWN", []).append(row)
+            if not rows_by_service:
+                continue
+            average = _collect_average(page)
+            for service, rows in rows_by_service.items():
+                data = result.setdefault(service, ServiceData())
+                data.rows.extend(rows)
+                # a detail page is about one service, so its average is that
+                # service's; skip the ambiguous index page (many services)
+                if average and data.average is None and len(rows_by_service) == 1:
+                    data.average = average
+
+        # rows repeat across chart/table blocks: keep one per (period, unit)
+        for data in result.values():
+            data.rows = sorted(
+                {(r["period"], r["unitOfMeasure"]): r for r in data.rows}.values(),
+                key=lambda r: r["period"],
+            )
         return result
 
 
