@@ -11,12 +11,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import json
+import logging
 import re
 from urllib.parse import quote, urlsplit
 
 import aiohttp
 
 from .const import BASE_URL, COOKIE_PREFIX, USER_AGENT
+
+_LOGGER = logging.getLogger(__name__)
 
 _FLIGHT = re.compile(r'self\.__next_f\.push\(\[1,("(?:[^"\\]|\\.)*")\]\)')
 _ROW = re.compile(r'\{"period":"\d{4}-\d{2}","service":"[^{}]*\}')
@@ -159,18 +162,28 @@ async def login(session: aiohttp.ClientSession, username: str, password: str) ->
     try:
         # 1. CSRF token (sets the csrf cookie) + provider discovery
         async with session.get(f"{BASE_URL}/api/auth/csrf", headers=headers, timeout=_TIMEOUT) as resp:
+            csrf_body = (await resp.text()).strip()
+            _LOGGER.debug("Techem csrf: HTTP %s, body starts: %.120r", resp.status, csrf_body)
             if resp.status != 200:
                 raise TechemError(f"csrf: HTTP {resp.status}")
-            csrf_token = (await resp.json(content_type=None)).get("csrfToken")
+        try:
+            csrf_token = json.loads(csrf_body).get("csrfToken")
+        except ValueError as err:
+            raise TechemError(f"csrf step returned a non-JSON body (starts: {csrf_body[:80]!r})") from err
         if not csrf_token:
             raise TechemError("portal did not return a CSRF token")
 
         async with session.get(f"{BASE_URL}/api/auth/providers", headers=headers, timeout=_TIMEOUT) as resp:
-            providers = await resp.json(content_type=None) if resp.status == 200 else {}
+            prov_body = (await resp.text()).strip()
+        try:
+            providers = json.loads(prov_body)
+        except ValueError:
+            providers = {}
         provider_id = next(
             (p["id"] for p in (providers or {}).values() if p.get("type") in ("oauth", "oidc") and p.get("id")),
             "azure-ad-b2c",
         )
+        _LOGGER.debug("Techem provider id: %s", provider_id)
 
         # 2. Begin sign-in -> NextAuth returns the B2C authorize URL
         async with session.post(
@@ -186,6 +199,7 @@ async def login(session: aiohttp.ClientSession, username: str, password: str) ->
                     authorize_url = (await resp.json(content_type=None)).get("url", "")
                 except (ValueError, aiohttp.ClientError):
                     authorize_url = ""
+        _LOGGER.debug("Techem signin -> authorize url: %.120r", authorize_url)
         if "authorize" not in authorize_url and "b2clogin" not in authorize_url:
             raise TechemError("could not start the portal login")
 
@@ -212,7 +226,10 @@ async def login(session: aiohttp.ClientSession, username: str, password: str) ->
         base = f"{origin}{tenant}"
         query = {"tx": tx, "p": policy}
 
-        # 4. Submit the credentials
+        _LOGGER.debug("Techem B2C page ok (policy=%s, api=%s); submitting credentials", policy, api)
+
+        # 4. Submit the credentials. SelfAsserted answers with a small JSON
+        #    {"status": "200"} on success; anything else we surface verbatim.
         async with session.post(
             f"{base}/SelfAsserted",
             params=query,
@@ -224,9 +241,18 @@ async def login(session: aiohttp.ClientSession, username: str, password: str) ->
                 "Origin": origin,
                 "Referer": login_page_url,
             },
+            allow_redirects=False,
             timeout=_TIMEOUT,
         ) as resp:
-            result = await resp.json(content_type=None)
+            body = (await resp.text()).strip()
+            _LOGGER.debug("Techem SelfAsserted: HTTP %s, body starts: %.200r", resp.status, body)
+        try:
+            result = json.loads(body)
+        except ValueError as err:
+            raise TechemError(
+                f"credential step returned HTTP {resp.status} with a non-JSON body "
+                f"(starts: {body[:80]!r}); the portal login flow may have changed"
+            ) from err
         if str(result.get("status")) != "200":
             raise TechemAuthError(result.get("message") or result.get("errorCode") or "login rejected")
 
@@ -240,10 +266,12 @@ async def login(session: aiohttp.ClientSession, username: str, password: str) ->
             timeout=_TIMEOUT,
         ) as resp:
             await resp.read()
+            _LOGGER.debug("Techem confirmed: ended at HTTP %s %s", resp.status, resp.url)
     except (aiohttp.ClientError, TimeoutError) as err:
         raise TechemError(f"login failed: {err}") from err
 
     cookies = _session_cookies(session.cookie_jar)
+    _LOGGER.debug("Techem login produced %d session cookie(s): %s", len(cookies), list(cookies))
     if not cookies:
         raise TechemInteractionRequired(
             "the credentials were accepted but no session was issued; open "

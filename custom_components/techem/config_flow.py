@@ -90,7 +90,7 @@ class TechemConfigFlow(ConfigFlow, domain=DOMAIN):
                 errors["base"] = "interaction_required"
             except TechemAuthError:
                 errors["base"] = "invalid_auth"
-            except (TechemError, aiohttp.ClientError, TimeoutError):
+            except (TechemError, ValueError, aiohttp.ClientError, TimeoutError):
                 errors["base"] = "cannot_connect"
             else:
                 await self.async_set_unique_id(user)
@@ -118,7 +118,7 @@ class TechemConfigFlow(ConfigFlow, domain=DOMAIN):
                     user, cookies = await self._validate(cookies)
                 except TechemAuthError:
                     errors["base"] = "invalid_auth"
-                except (TechemError, aiohttp.ClientError, TimeoutError):
+                except (TechemError, ValueError, aiohttp.ClientError, TimeoutError):
                     errors["base"] = "cannot_connect"
                 else:
                     await self.async_set_unique_id(user)
@@ -151,7 +151,7 @@ class TechemConfigFlow(ConfigFlow, domain=DOMAIN):
                 errors["base"] = "interaction_required"
             except TechemAuthError:
                 errors["base"] = "invalid_auth"
-            except (TechemError, aiohttp.ClientError, TimeoutError):
+            except (TechemError, ValueError, aiohttp.ClientError, TimeoutError):
                 errors["base"] = "cannot_connect"
             else:
                 if not errors:
