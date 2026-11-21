@@ -10,6 +10,7 @@ check, so polling keeps it alive.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from html import unescape
 import json
 import logging
 import re
@@ -299,6 +300,42 @@ async def _request(
     raise TechemError("too many redirects during login")
 
 
+_FORM = re.compile(r"<form\b([^>]*)>(.*?)</form>", re.IGNORECASE | re.DOTALL)
+_INPUT = re.compile(r"<input\b([^>]*?)/?>", re.IGNORECASE | re.DOTALL)
+
+
+def _attr(name: str, text: str) -> str | None:
+    m = re.search(rf'{name}\s*=\s*"([^"]*)"', text, re.IGNORECASE)
+    return m.group(1) if m else None
+
+
+def _auto_post_form(html: str, current_url: str) -> tuple[str, dict[str, str]] | None:
+    """Detect an auto-submitting POST form (Azure B2C `response_mode=form_post`).
+
+    B2C often returns the authorization response as an HTML page that posts a
+    hidden `code`/`state` form to the app's callback via JavaScript, instead of
+    a 302. Browsers submit it automatically; our hand-driven client has to do it
+    too. Returns (absolute action URL, hidden fields) or None if the page is not
+    such a form.
+    """
+    low = html.lower()
+    if "<form" not in low or (".submit()" not in low and "onload" not in low):
+        return None  # not a self-submitting page: nothing to follow
+    match = _FORM.search(html)
+    if not match:
+        return None
+    attrs, inner = match.group(1), match.group(2)
+    action = _attr("action", attrs)
+    if (_attr("method", attrs) or "get").lower() != "post" or not action:
+        return None
+    fields = {
+        name: unescape(_attr("value", inp) or "")
+        for inp in _INPUT.findall(inner)
+        if (name := _attr("name", inp)) is not None
+    }
+    return urljoin(current_url, unescape(action)), fields
+
+
 async def login(session: aiohttp.ClientSession, username: str, password: str) -> dict[str, str]:
     """Log in to mieter.techem.de with e-mail and password.
 
@@ -390,19 +427,34 @@ async def login(session: aiohttp.ClientSession, username: str, password: str) ->
         if str(result.get("status")) != "200":
             raise TechemAuthError(result.get("message") or result.get("errorCode") or "login rejected")
 
-        # 5. Follow the "confirmed" redirect chain; the NextAuth callback in it
-        #    sets the session cookie, which we collect in `cookies`.
-        status, final_url, _ = await _request(
+        # 5. Complete the authorization response. B2C answers `confirmed` either
+        #    with a 302 chain (followed by _request) or with an HTML self-posting
+        #    form (response_mode=form_post). Follow whichever we get until the
+        #    NextAuth callback sets the session cookie in `cookies`.
+        status, final_url, body = await _request(
             session, cookies, "GET", f"{base}/api/{api}/confirmed",
             params={"rememberMe": "false", "csrf_token": b2c_csrf, **query},
             extra={"Referer": login_page_url},
         )
+        for _ in range(5):
+            form = _auto_post_form(body, final_url)
+            if not form:
+                break
+            action, fields = form
+            _LOGGER.debug("Techem confirmed: auto-posting form to %s (%d fields)", action, len(fields))
+            status, final_url, body = await _request(
+                session, cookies, "POST", action, data=fields,
+                extra={"Content-Type": "application/x-www-form-urlencoded", "Referer": final_url},
+            )
         _LOGGER.debug("Techem confirmed: ended at HTTP %s %s", status, final_url)
     except (aiohttp.ClientError, TimeoutError) as err:
         raise TechemError(f"login failed: {err}") from err
 
     session_cookies = cookies.session_cookies()
-    _LOGGER.debug("Techem login produced %d session cookie(s): %s", len(session_cookies), list(session_cookies))
+    _LOGGER.debug(
+        "Techem login produced %d session cookie(s): %s (all cookies: %s)",
+        len(session_cookies), list(session_cookies), list(cookies._c),
+    )
     if not session_cookies:
         raise TechemInteractionRequired(
             "the credentials were accepted but no session was issued; open "
