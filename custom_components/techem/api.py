@@ -308,8 +308,9 @@ _INPUT = re.compile(r"<input\b([^>]*?)/?>", re.IGNORECASE | re.DOTALL)
 
 
 def _attr(name: str, text: str) -> str | None:
-    m = re.search(rf'{name}\s*=\s*"([^"]*)"', text, re.IGNORECASE)
-    return m.group(1) if m else None
+    # B2C writes its form_post page with single-quoted attributes, so accept both
+    m = re.search(rf"""\b{name}\s*=\s*(["'])(.*?)\1""", text, re.IGNORECASE | re.DOTALL)
+    return m.group(2) if m else None
 
 
 def _auto_post_form(html: str, current_url: str) -> tuple[str, dict[str, str]] | None:
