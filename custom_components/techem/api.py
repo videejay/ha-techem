@@ -249,6 +249,7 @@ class _Cookies:
 
     def __init__(self) -> None:
         self._c: dict[str, str] = {}
+        self.hops: list[str] = []  # "METHOD status host/path" per request, for diagnostics
 
     def header(self) -> str:
         return "; ".join(f"{k}={v}" for k, v in self._c.items())
@@ -292,6 +293,8 @@ async def _request(
             cookies.absorb(resp)
             body = await resp.read()
             location = resp.headers.get("Location")
+            hop = urlsplit(str(resp.url))
+            cookies.hops.append(f"{method} {resp.status} {hop.netloc}{hop.path}")
             if resp.status in (301, 302, 303, 307, 308) and location:
                 url = urljoin(str(resp.url), location)
                 method, data, extra = "GET", None, None
@@ -456,6 +459,17 @@ async def login(session: aiohttp.ClientSession, username: str, password: str) ->
         len(session_cookies), list(session_cookies), list(cookies._c),
     )
     if not session_cookies:
+        title = re.search(r"<title[^>]*>(.*?)</title>", body or "", re.IGNORECASE | re.DOTALL)
+        text = re.sub(r"<[^>]+>|\s+", " ", re.sub(r"(?is)<(script|style)\b.*?</\1>", " ", body or ""))
+        nextauth_error = re.search(r"[?&]error=([^&#]+)", final_url or "")
+        _LOGGER.warning(
+            "Techem login: credentials accepted but no session cookie. final=HTTP %s %s, "
+            "nextauth_error=%s, title=%r, cookies=%s, hops=%s, page=%.300r",
+            status, urlsplit(final_url or "").path, nextauth_error and nextauth_error.group(1),
+            title and title.group(1).strip(), list(cookies._c), cookies.hops, text.strip(),
+        )
+        if nextauth_error:
+            raise TechemError(f"portal login callback failed: {nextauth_error.group(1)}")
         raise TechemInteractionRequired(
             "the credentials were accepted but no session was issued; open "
             "mieter.techem.de once in a browser to clear any pending step "
